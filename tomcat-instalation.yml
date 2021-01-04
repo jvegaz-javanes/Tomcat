@@ -1,0 +1,119 @@
+---
+- name : Tomcat server installed
+  host: tomcat-server
+  become: yes
+  tasks:
+   - name: Install OpenJDK 11 
+     yum:
+       name: java-11-openjdk-devel
+       state: latest
+   - name:  set Java environment variables
+     shell: | 
+       cat > /etc/profile.d/java11.sh <<EOF
+       export JAVA_HOME=\$(dirname \$(dirname \$(readlink \$(readlink \$(which javac)))))
+       export PATH=\$PATH:\$JAVA_HOME/bin
+       export CLASSPATH=.:\$JAVA_HOME/jre/lib:\$JAVA_HOME/lib:\$JAVA_HOME/lib/tools.jar
+       EOF
+   - name: Source the file to start using it without logging out.
+     shell: source /etc/profile.d/java11.sh
+   - name: Create tomcat user and group
+     shell: sudo groupadd --system tomcat
+       sudo useradd -d /usr/share/tomcat -r -s /bin/false -g tomcat tomcat
+   - name: Install Tomcat 9
+     shell: | 
+       sudo yum -y install wget
+       export VER="9.0.41"
+       wget https://archive.apache.org/dist/tomcat/tomcat-9/v${VER}/bin/apache-tomcat-${VER}.tar.gz
+   - name: Extract file with tar 
+     shell: sudo tar xvf apache-tomcat-${VER}.tar.gz -C /usr/share/
+   - name: Create symlink to extracted tomcat data.
+     shell: sudo ln -s /usr/share/apache-tomcat-$VER/ /usr/share/tomcat
+   - name: Set proper directory permissions
+     shell: |
+       sudo chown -R tomcat:tomcat /usr/share/tomcat
+       sudo chown -R tomcat:tomcat /usr/share/apache-tomcat-$VER/
+   - name: Configure Tomcat 9 Systemd service
+     file:
+       path: /etc/systemd/system/tomcat.service
+       state: touch
+     lineinfile:
+       path: /etc/systemd/system/tomcat.service
+       line: | 
+         [Unit]
+         Description=Tomcat Server
+         After=syslog.target network.target
+         
+         [Service]
+         Type=forking
+         User=tomcat
+         Group=tomcat
+
+         Environment=JAVA_HOME=/usr/lib/jvm/jre
+         Environment='JAVA_OPTS=-Djava.awt.headless=true'
+         Environment=CATALINA_HOME=/usr/share/tomcat
+         Environment=CATALINA_BASE=/usr/share/tomcat
+         Environment=CATALINA_PID=/usr/share/tomcat/temp/tomcat.pid
+         Environment='CATALINA_OPTS=-Xms512M -Xmx1024M'
+         ExecStart=/usr/share/tomcat/bin/catalina.sh start
+         ExecStop=/usr/share/tomcat/bin/catalina.sh stop
+
+         [Install]
+         WantedBy=multi-user.target
+       create: yes
+   - name: Reload demon 
+     shell: sudo systemctl daemon-reload
+   - name: Start and enable Tomcat
+     service:
+       name: tomcat
+       state: started
+       enabled: true
+   - name: Configure Firewall
+     shell: |
+       sudo firewall-cmd --permanent --add-port=8080/tcp
+       sudo firewall-cmd --reload
+   - name: Configure Tomcat Authentication
+     lineinfile:
+       path: /usr/share/tomcat/conf/tomcat-users.xml
+       regexp: '<\/tomcat>'
+       insertbefore: '<\/tomcat>'
+       line: | 
+         <role rolename="admin-gui"/>
+         <role rolename="manager-gui"/>
+         <role rolename="manager-script"/>
+         <role rolename="manager-jmx"/>
+         <role rolename="manager-status"/>
+         <user username="admin" password="admin"
+         roles="admin-gui,manager-gui,manager-script,manager-jmx,manager-status"/>
+       create: yes
+   - name: Configure Tomcat Proxy
+     yum:
+       name: httpd
+       state: latest
+   - name: Create VirtualHost for accessing Tomcat Admin web interface
+     file:
+       path: /etc/httpd/conf.d/tomcat_manager.conf
+       state: touch
+     lineinfile:
+       path: /etc/httpd/conf.d/tomcat_manager.conf
+       line: | 
+         <VirtualHost *:80>
+         ServerAdmin root@localhost
+         ServerName tomcat.example.com
+         DefaultType text/html
+         ProxyRequests off
+         ProxyPreserveHost On
+         ProxyPass / http://localhost:8080/
+         ProxyPassReverse / http://localhost:8080/
+         </VirtualHost>
+       create: yes
+   - name: Configure SELinux for Apache to access Tomcat
+     shell: |
+       sudo setsebool -P httpd_can_network_connect 1
+       sudo setsebool -P httpd_can_network_relay 1
+       sudo setsebool -P httpd_graceful_shutdown 1
+       sudo setsebool -P nis_enabled 1
+   - name: Restart httpd service
+     service:
+       name: httpd
+       state: Restart
+       enabled: true
